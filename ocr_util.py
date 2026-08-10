@@ -198,17 +198,31 @@ def call_vision_model(image_bytes, model_name, prompt_text, timeout=300):
     )
 
 
+FAILED_OCR_CONTENT = "识别失败"
+
+
 def process_single_image(image_bytes, model_name, prompt_text):
-    """处理单张图片（内存中的 bytes），失败时异常会向上抛出"""
-    result = {'content': '', 'time': 0, 'input_tokens': 0, 'output_tokens': 0}
+    """处理单张图片（内存中的 bytes）；失败时返回 content=识别失败，不中断批次"""
+    result = {
+        'content': FAILED_OCR_CONTENT,
+        'time': 0,
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'failed': False,
+    }
     start_time = time.time()
 
-    content, prompt_tokens, completion_tokens = call_vision_model(
-        image_bytes, model_name, prompt_text
-    )
-    result['content'] = content
-    result['input_tokens'] = prompt_tokens
-    result['output_tokens'] = completion_tokens
+    try:
+        content, prompt_tokens, completion_tokens = call_vision_model(
+            image_bytes, model_name, prompt_text
+        )
+        result['content'] = content if content else FAILED_OCR_CONTENT
+        result['input_tokens'] = prompt_tokens
+        result['output_tokens'] = completion_tokens
+    except Exception as e:
+        print(f"ERROR: OCR 识别失败: {e}")
+        result['content'] = FAILED_OCR_CONTENT
+        result['failed'] = True
     result['time'] = time.time() - start_time
 
     return result
@@ -218,7 +232,7 @@ def process_images_batch(image_tuples, model_name, prompt_text, max_workers=6):
     """
     批量处理图片（内存中）
     image_tuples: [(timestamp_seconds, image_bytes), ...]
-    任意一张图片调用失败（含连接失败）都会中断整个批次并抛出 OCRConnectionError。
+    单张失败不会中断批次，失败帧 content 为「识别失败」。
     """
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -228,8 +242,17 @@ def process_images_batch(image_tuples, model_name, prompt_text, max_workers=6):
         }
         for future in concurrent.futures.as_completed(future_to_image):
             ts = future_to_image[future]
-            # 不吞异常：直接让 OCRConnectionError / 其他异常向上抛出
-            result_data = future.result()
+            try:
+                result_data = future.result()
+            except Exception as e:
+                print(f"ERROR: OCR 任务异常 (ts={ts}): {e}")
+                result_data = {
+                    'content': FAILED_OCR_CONTENT,
+                    'time': 0,
+                    'input_tokens': 0,
+                    'output_tokens': 0,
+                    'failed': True,
+                }
             results.append({
                 'timestamp': ts,
                 'content': result_data['content'],

@@ -38,8 +38,8 @@ def process_video(
     model_name="qwen2.5vl:7b",
     interval_seconds=5,
     max_test_seconds=None,
-    phash_threshold=8,
-    max_ocr_workers=2,
+    phash_threshold=4,
+    max_ocr_workers=1,
 ):
     """
     Process a single video file
@@ -47,7 +47,7 @@ def process_video(
     - Use pHash to skip similar frames
     - Process new frames immediately (no buffer, sequential)
     - max_test_seconds: only process this many seconds for testing (set to None for full video)
-    - phash_threshold: pHash difference threshold, below this means frames are similar
+    - phash_threshold: pHash difference threshold, below this means frames are similar (smaller = stricter)
     """
     print(f"开始处理视频: {video_path}")
     print(f"OCR 后端: {ocr_util.OCR_BACKEND}, model={model_name}")
@@ -97,6 +97,8 @@ def process_video(
     frame_idx = 1  # 当前处理的总帧序号（不管是跳过还是处理）
     processed_frame_count = 0
     skipped_frame_count = 0
+    extract_failed_count = 0
+    ocr_failed_count = 0
     total_ocr_time = 0
     actual_ocr_count = 0
     average_ocr_time = 0
@@ -124,97 +126,32 @@ If no text is detected on the screen, reply with "No text detected."
 Otherwise, output the transcribed text directly. Do NOT include any introductory greetings (e.g., "Here is the transcription:") or closing remarks. Jump straight into the transcribed text.
         """
 
-    # Collect all frame results in memory first
-    all_frame_results = []
+    def make_result(timestamp, content, ocr_time=0, input_tokens=0, output_tokens=0):
+        return {
+            "timestamp": timestamp,
+            "content": content,
+            "time": ocr_time,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
 
-    while current_time <= duration:
-        # Extract frame and pHash
-        frame_bytes, current_phash = extract_frame_as_bytes_and_phash(cap, current_time)
+    def flush_batch():
+        """处理并写入当前 batch，保证时间戳顺序。"""
+        nonlocal batch_queue, processed_frame_count, ocr_failed_count
+        nonlocal total_ocr_time, actual_ocr_count, average_ocr_time
 
-        if not frame_bytes or not current_phash:
-            print(f"WARNING: 无法提取帧，时间: {current_time:.2f}s")
-            current_time += interval_seconds
-            frame_idx += 1
-            continue
+        if not batch_queue:
+            return
 
-        # Check if frame is similar to any previously processed frame
-        is_similar = False
-        reused_ocr_result = None
-        phash_diff_for_log = None
-
-        for stored_phash, stored_ocr_content in processed_frames_cache.items():
-            diff = current_phash - stored_phash
-            if diff <= phash_threshold:
-                is_similar = True
-                reused_ocr_result = stored_ocr_content
-                phash_diff_for_log = diff  # Store the first found diff for logging
-                break  # Found a similar frame, no need to check further
-
-        if is_similar:
-            # Similar frame - skip model processing, reuse previous result
-            skipped_frame_count += 1
-
-            # Similar frame - skip model processing, reuse previous result, do not write to file
-            # We still need to increment skipped_frame_count
-            # The `all_frame_results` is not used for file writing, so we will not append reused results to it.
-        else:
-            # Different frame - process immediately with OCR
-            processed_frame_count += 1
-            print(
-                f"DEBUG: [处理] 帧 {frame_idx}/{expected_frame_count} (新画面 pHash: {current_phash})，开始 OCR 处理"
-            )
-            # Collect frames for batch processing
-            # 攒够八个需要处理的，一起发
-            batch_queue.append((current_time, frame_bytes, current_phash))
-
-            if (
-                len(batch_queue) >= BATCH_SIZE
-                or current_time + interval_seconds > duration
-            ):
-                processed_frame_count += len(batch_queue)
-                print(
-                    f"DEBUG: [处理] 帧 {frame_idx-len(batch_queue)+1}-{frame_idx}/{expected_frame_count} (批量 OCR {len(batch_queue)} 帧)，开始 OCR 处理"
-                )
-
-                batch_input = []
-                for ts, img_bytes, phash_obj in batch_queue:
-                    batch_input.append((ts, img_bytes))
-
-                results = ocr_util.process_images_batch(
-                    batch_input, model_name, ocr_prompt, max_workers=max_ocr_workers
-                )
-
-                # Update total OCR time and count, and processed_frames_cache
-                for i, result in enumerate(results):
-                    total_ocr_time += result["time"]
-                    actual_ocr_count += 1
-                    average_ocr_time = (
-                        total_ocr_time / actual_ocr_count if actual_ocr_count > 0 else 0
-                    )
-                    # Use the phash from the batch_queue for the corresponding result
-                    processed_frames_cache[batch_queue[i][2]] = result["content"]
-
-                all_frame_results.extend(results)
-                ocr_util.append_results_to_file(
-                    output_file_path, results, average_ocr_time
-                )
-                batch_queue = []  # Clear the batch after processing
-
-        frame_idx += 1
-        current_time += interval_seconds
-
-    # Process any remaining frames in the batch_queue
-    if batch_queue:
-        processed_frame_count += len(batch_queue)
         print(
-            f"DEBUG: [处理] 帧 {frame_idx-len(batch_queue)}-{frame_idx-1}/{expected_frame_count} (批量 OCR {len(batch_queue)} 帧 - 视频结束)，开始 OCR 处理"
+            f"DEBUG: [处理] 批量 OCR {len(batch_queue)} 帧，开始 OCR 处理"
         )
         batch_input = [(ts, img_bytes) for ts, img_bytes, _phash in batch_queue]
         results = ocr_util.process_images_batch(
             batch_input, model_name, ocr_prompt, max_workers=max_ocr_workers
         )
 
-        # Update total OCR time and count, and processed_frames_cache
+        # results 已按 timestamp 排序，与 batch_queue 时间顺序一致
         for i, result in enumerate(results):
             total_ocr_time += result["time"]
             actual_ocr_count += 1
@@ -222,41 +159,93 @@ Otherwise, output the transcribed text directly. Do NOT include any introductory
                 total_ocr_time / actual_ocr_count if actual_ocr_count > 0 else 0
             )
             processed_frames_cache[batch_queue[i][2]] = result["content"]
+            if result["content"] == ocr_util.FAILED_OCR_CONTENT:
+                ocr_failed_count += 1
 
-        all_frame_results.extend(results)
+        processed_frame_count += len(batch_queue)
         ocr_util.append_results_to_file(output_file_path, results, average_ocr_time)
+        batch_queue = []
+
+    while current_time <= duration:
+        # Extract frame and pHash
+        frame_bytes, current_phash = extract_frame_as_bytes_and_phash(cap, current_time)
+
+        if not frame_bytes or not current_phash:
+            print(f"WARNING: 无法提取帧，时间: {current_time:.2f}s，写入「识别失败」")
+            # 先刷掉更早的 batch，再写入当前秒，保证 txt 时间序
+            flush_batch()
+            extract_failed_count += 1
+            ocr_util.append_results_to_file(
+                output_file_path,
+                [make_result(current_time, ocr_util.FAILED_OCR_CONTENT)],
+                average_ocr_time,
+            )
+            frame_idx += 1
+            current_time += interval_seconds
+            continue
+
+        # Check if frame is similar to any previously processed frame
+        is_similar = False
+        reused_ocr_result = None
+
+        for stored_phash, stored_ocr_content in processed_frames_cache.items():
+            diff = current_phash - stored_phash
+            if diff <= phash_threshold:
+                is_similar = True
+                reused_ocr_result = stored_ocr_content
+                break
+
+        if is_similar:
+            # 重复画面：不调模型，但仍把复用结果写入对应秒
+            skipped_frame_count += 1
+            print(
+                f"DEBUG: [跳过] 帧 {frame_idx}/{expected_frame_count} "
+                f"(相似画面 pHash: {current_phash})，复用结果并写入"
+            )
+            flush_batch()
+            ocr_util.append_results_to_file(
+                output_file_path,
+                [make_result(current_time, reused_ocr_result)],
+                average_ocr_time,
+            )
+        else:
+            print(
+                f"DEBUG: [排队] 帧 {frame_idx}/{expected_frame_count} "
+                f"(新画面 pHash: {current_phash})"
+            )
+            batch_queue.append((current_time, frame_bytes, current_phash))
+
+            if (
+                len(batch_queue) >= BATCH_SIZE
+                or current_time + interval_seconds > duration
+            ):
+                flush_batch()
+
+        frame_idx += 1
+        current_time += interval_seconds
+
+    # Process any remaining frames in the batch_queue
+    flush_batch()
 
     # Print summary
+    total_written = processed_frame_count + skipped_frame_count + extract_failed_count
     summary = [
         "=" * 60,
         "视频处理统计",
         "=" * 60,
         f"视频文件名: {video_name}",
-        f"处理帧数: {processed_frame_count}",
-        f"跳过帧数: {skipped_frame_count}",
-        f"总帧数: {processed_frame_count + skipped_frame_count}",
+        f"OCR 处理帧数: {processed_frame_count}",
+        f"跳过(复用)帧数: {skipped_frame_count}",
+        f"抽帧失败帧数: {extract_failed_count}",
+        f"OCR 识别失败帧数: {ocr_failed_count}",
+        f"总写入帧数: {total_written}",
         "=" * 60,
     ]
     print("\n".join(summary))
 
-    # Frame results were persisted above.  Keep them intact and append the
-    # final summary instead of overwriting the live output file.
     with open(output_file_path, "a", encoding="utf-8") as f:
-        # Write summary
         for line in summary:
             f.write(line + "\n")
-
-        # Write all frame results
-        for result in []:  # Frames have already been appended in real time.
-            hours = int(result["timestamp"] // 3600)
-            minutes = int((result["timestamp"] % 3600) // 60)
-            seconds = int(result["timestamp"] % 60)
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            f.write(f"\n{'='*60}\n")
-            f.write(f"时间戳: {time_str} ({result['timestamp']:.2f}s)\n")
-            f.write(f"{'='*60}\n")
-            f.write(result["content"])
-            f.write("\n")
 
     # Release video capture
     cap.release()
@@ -317,7 +306,7 @@ def main():
             model_name=os.environ.get("OCR_MODEL", "qwen3-vl:32b"),
             interval_seconds=1,
             max_test_seconds=None,  # Process full video
-            max_ocr_workers=int(os.environ.get("OCR_MAX_WORKERS", "2")),
+            max_ocr_workers=int(os.environ.get("OCR_MAX_WORKERS", "1")),
         )
 
     end_time = time.time()
