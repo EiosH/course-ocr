@@ -32,6 +32,109 @@ def extract_frame_as_bytes_and_phash(video_capture, timestamp_seconds):
     return img_byte_arr.getvalue(), phash
 
 
+def parse_time_to_seconds(value):
+    """将秒数或 'HH:MM:SS' / 'MM:SS' 字符串转为浮点秒。"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        parts = text.split(":")
+        try:
+            if len(parts) == 3:
+                hours, minutes, seconds = parts
+                return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            if len(parts) == 2:
+                minutes, seconds = parts
+                return int(minutes) * 60 + float(seconds)
+            return float(text)
+        except ValueError as e:
+            raise ValueError(f"无法解析时间: {value!r}") from e
+    raise ValueError(f"不支持的时间类型: {type(value).__name__} ({value!r})")
+
+
+def normalize_time_ranges(time_ranges):
+    """
+    规范化时间段数组。
+    入参示例: [(0, 60), ("10:00", "12:30"), [90, 120]]
+    返回按起点排序的 [(start_sec, end_sec), ...]；None/空表示不限制。
+    """
+    if not time_ranges:
+        return None
+
+    normalized = []
+    for idx, item in enumerate(time_ranges):
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError(
+                f"time_ranges[{idx}] 必须是 [start, end] 或 (start, end)，实际为: {item!r}"
+            )
+        start = parse_time_to_seconds(item[0])
+        end = parse_time_to_seconds(item[1])
+        if start < 0 or end < 0:
+            raise ValueError(f"time_ranges[{idx}] 时间不能为负数: {item!r}")
+        if end < start:
+            start, end = end, start
+        normalized.append((start, end))
+
+    normalized.sort(key=lambda pair: pair[0])
+    return normalized
+
+
+def format_time_ranges(time_ranges):
+    """用于日志展示。"""
+    if not time_ranges:
+        return "整段视频"
+
+    def fmt(sec):
+        hours = int(sec // 3600)
+        minutes = int((sec % 3600) // 60)
+        seconds = sec % 60
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:05.2f}"
+        return f"{minutes:02d}:{seconds:05.2f}"
+
+    return ", ".join(f"[{fmt(start)} ~ {fmt(end)}]" for start, end in time_ranges)
+
+
+def build_timestamps(duration, interval_seconds, time_ranges=None):
+    """
+    生成待处理时间戳列表。
+    time_ranges 为 None/空时：从 0 到 duration，按 interval 取样。
+    有时间段时：只在各 [start, end] 内按 interval 取样（含端点附近对齐的点）。
+    """
+    if interval_seconds <= 0:
+        raise ValueError(f"interval_seconds 必须 > 0，实际为: {interval_seconds}")
+
+    if duration <= 0:
+        return []
+
+    if not time_ranges:
+        timestamps = []
+        t = 0.0
+        while t <= duration + 1e-9:
+            timestamps.append(round(t, 6))
+            t += interval_seconds
+        return timestamps
+
+    timestamps = []
+    seen = set()
+    for start, end in time_ranges:
+        start = max(0.0, start)
+        end = min(duration, end)
+        if start > duration or end < 0 or start > end:
+            continue
+
+        t = start
+        while t <= end + 1e-9:
+            key = round(t, 3)
+            if key not in seen and t <= duration + 1e-9:
+                seen.add(key)
+                timestamps.append(round(t, 6))
+            t += interval_seconds
+
+    timestamps.sort()
+    return timestamps
+
+
 def process_video(
     video_path,
     output_dir,
@@ -40,6 +143,7 @@ def process_video(
     max_test_seconds=None,
     phash_threshold=4,
     max_ocr_workers=1,
+    time_ranges=None,
 ):
     """
     Process a single video file
@@ -48,9 +152,17 @@ def process_video(
     - Process new frames immediately (no buffer, sequential)
     - max_test_seconds: only process this many seconds for testing (set to None for full video)
     - phash_threshold: pHash difference threshold, below this means frames are similar (smaller = stricter)
+    - time_ranges: 只处理这些时间段内的截图，例如 [(0, 60), ("10:00", "12:30")]；
+      None 或 [] 表示处理整段视频
     """
     print(f"开始处理视频: {video_path}")
     print(f"OCR 后端: {ocr_util.OCR_BACKEND}, model={model_name}")
+
+    try:
+        normalized_ranges = normalize_time_ranges(time_ranges)
+    except ValueError as e:
+        print(f"ERROR: time_ranges 无效: {e}")
+        return
 
     # Write beside the source video, using exactly the same basename.
     video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -85,15 +197,20 @@ def process_video(
         duration = min(duration, max_test_seconds)
         print(f"测试模式: 只处理前 {max_test_seconds} 秒")
 
-    # 计算预计处理的帧数
-    expected_frame_count = int(duration // interval_seconds) + 1
+    timestamps = build_timestamps(duration, interval_seconds, normalized_ranges)
+    expected_frame_count = len(timestamps)
 
-    print(f"视频信息: {total_frames} 帧, {fps:.2f} FPS, 处理时长: {duration:.2f}s")
+    print(f"视频信息: {total_frames} 帧, {fps:.2f} FPS, 视频时长: {duration:.2f}s")
+    print(f"处理时间段: {format_time_ranges(normalized_ranges)}")
     print(f"预计处理帧数: {expected_frame_count} (每 {interval_seconds} 秒1帧)")
     print(f"pHash 阈值: {phash_threshold} (差异小于此值视为相同画面)")
 
+    if expected_frame_count == 0:
+        print("WARNING: 没有可处理的时间点（时间段为空或超出视频时长）")
+        cap.release()
+        return
+
     # Initialize variables
-    current_time = 0
     frame_idx = 1  # 当前处理的总帧序号（不管是跳过还是处理）
     processed_frame_count = 0
     skipped_frame_count = 0
@@ -166,7 +283,9 @@ Otherwise, output the transcribed text directly. Do NOT include any introductory
         ocr_util.append_results_to_file(output_file_path, results, average_ocr_time)
         batch_queue = []
 
-    while current_time <= duration:
+    for ts_idx, current_time in enumerate(timestamps):
+        is_last_timestamp = ts_idx == expected_frame_count - 1
+
         # Extract frame and pHash
         frame_bytes, current_phash = extract_frame_as_bytes_and_phash(cap, current_time)
 
@@ -181,7 +300,6 @@ Otherwise, output the transcribed text directly. Do NOT include any introductory
                 average_ocr_time,
             )
             frame_idx += 1
-            current_time += interval_seconds
             continue
 
         # Check if frame is similar to any previously processed frame
@@ -215,14 +333,10 @@ Otherwise, output the transcribed text directly. Do NOT include any introductory
             )
             batch_queue.append((current_time, frame_bytes, current_phash))
 
-            if (
-                len(batch_queue) >= BATCH_SIZE
-                or current_time + interval_seconds > duration
-            ):
+            if len(batch_queue) >= BATCH_SIZE or is_last_timestamp:
                 flush_batch()
 
         frame_idx += 1
-        current_time += interval_seconds
 
     # Process any remaining frames in the batch_queue
     flush_batch()
@@ -234,6 +348,7 @@ Otherwise, output the transcribed text directly. Do NOT include any introductory
         "视频处理统计",
         "=" * 60,
         f"视频文件名: {video_name}",
+        f"处理时间段: {format_time_ranges(normalized_ranges)}",
         f"OCR 处理帧数: {processed_frame_count}",
         f"跳过(复用)帧数: {skipped_frame_count}",
         f"抽帧失败帧数: {extract_failed_count}",
@@ -297,6 +412,11 @@ def main():
         )
         output_files.append(output_file)
 
+        # 只处理指定时间段；None 或 [] 表示整段视频。
+        # 支持秒数或 "HH:MM:SS" / "MM:SS"，例如:
+        # time_ranges = [(0, 60), ("10:00", "12:30"), [90, 120]]
+        time_ranges = None
+
         # 默认走 Ollama（OCR_BACKEND=ollama）。若用 vLLM：
         #   OCR_BACKEND=vllm VLLM_BASE_URL=http://localhost:8000
         #   model_name="RedHatAI/Qwen2.5-VL-7B-Instruct-FP8-Dynamic"
@@ -307,6 +427,7 @@ def main():
             interval_seconds=1,
             max_test_seconds=None,  # Process full video
             max_ocr_workers=int(os.environ.get("OCR_MAX_WORKERS", "1")),
+            time_ranges=time_ranges,
         )
 
     end_time = time.time()
