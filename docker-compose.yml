@@ -1,0 +1,130 @@
+
+services:
+
+  # Qwen2.5-VL-7B FP8 Dynamic
+
+  qwen-vl-7b:
+    image: vllm/vllm-openai:v0.10.2
+
+    profiles:
+      - "7b"
+
+    runtime: nvidia
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./model_cache:/root/.cache/huggingface
+
+    environment:
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+
+    command:
+      - --model
+      - RedHatAI/Qwen2.5-VL-7B-Instruct-FP8-Dynamic
+      - --dtype
+      - auto
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "8192"
+      - --limit-mm-per-prompt
+      - '{"image":10}'
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+
+
+  # Qwen2.5-VL-8B FP8 Dynamic
+
+  qwen-vl-8b:
+    image: vllm/vllm-openai:v0.10.2
+
+    profiles:
+      - "8b"
+
+    runtime: nvidia
+
+    ports:
+      - "8001:8000"
+
+    volumes:
+      - ./model_cache:/root/.cache/huggingface
+
+    environment:
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+
+    command:
+      - --model
+      - RedHatAI/Qwen2.5-VL-8B-Instruct-FP8-Dynamic
+      - --dtype
+      - auto
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "8192"
+      - --limit-mm-per-prompt
+      - '{"image":10}'
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+
+
+  # Qwen2.5-VL-32B BNB 4bit
+
+  qwen-vl-32b:
+    image: vllm/vllm-openai:v0.10.2
+
+    profiles:
+      - "32b"
+
+    runtime: nvidia
+
+    ports:
+      - "8002:8000"
+
+    volumes:
+      - ./model_cache:/root/.cache/huggingface
+
+    environment:
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+
+    command:
+      - --model
+      - unsloth/Qwen2.5-VL-32B-Instruct-bnb-4bit
+      - --quantization
+      - bitsandbytes
+      - --dtype
+      - auto
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "4096"
+      - --limit-mm-per-prompt
+      - '{"image":6}'
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+

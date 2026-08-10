@@ -1,0 +1,49 @@
+=== OCR 性能比较报告 (并发数: 6) ===
+
+处理图片总数: 1
+
+--- 平均处理时间 (秒/图片) ---
+ollama_qwen2.5vl:7b: 20.6101 s
+ollama_qwen3-vl:8b-instruct: 13.0658 s
+ollama_qwen3-vl:8b-thinking: 23.6050 s
+
+--- 详细结果 ---
+图片: /mnt/c/Users/ywang342/Desktop/cdm/ocr/data/1.png
+  - ollama_qwen2.5vl:7b (耗时: 20.6101 s):
+    The slide is titled "Java Threads: The Basics" and introduces the concept of a thread as a lightweight unit of execution. It includes a Java code example and its output.
+    
+    ### Key Points:
+    1. **Thread Definition**:
+       - A thread is described as a lightweight unit of execution.
+    
+    2. **Java Code Example**:
+       - The code defines a class named `HelloThread`.
+       - The `main` method creates a new thread using a lambda expression.
+       - The lambda expression runs a block of code that prints "Hello from thread:" followed by the name of the current thread.
+       - The thread is started using the `start()` method.
+       - The main thread also prints "Hello from main:" followed by its name.
+    
+    3. **Output**:
+       - When the code is compiled and run with the command `$ javac HelloThread.java && java HelloThread`, the output is:
+         ```
+         Hello from main: main
+         Hello from thread: Thread-0
+         ```
+    
+    This slide is used to illustrate the basic concept of creating and starting a new thread in Java.
+  - ollama_qwen3-vl:8b-instruct (耗时: 13.0658 s):
+    This slide is from a university lecture on “Java Threads: The Basics.”
+    
+    Key points:
+    
+    - **Definition**: A thread is a lightweight unit of execution.
+    - **Code Example**: Demonstrates creating and starting a new thread in Java using an anonymous inner class.
+      - The `main` thread prints “Hello from main: main”.
+      - The new thread (named “Thread-0”) prints “Hello from thread: Thread-0”.
+    - **Output**: Shows the expected console output when running the program.
+    - **Purpose**: Introduces the fundamental concept of threads in Java and how to create them.
+    
+    The slide is educational, focusing on the basics of Java multithreading.
+  - ollama_qwen3-vl:8b-thinking (耗时: 23.6050 s):
+
+
