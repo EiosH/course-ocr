@@ -138,7 +138,7 @@ def build_timestamps(duration, interval_seconds, time_ranges=None):
 def process_video(
     video_path,
     output_dir,
-    model_name="qwen2.5vl:7b",
+    model_name,
     interval_seconds=5,
     max_test_seconds=None,
     phash_threshold=4,
@@ -226,22 +226,66 @@ def process_video(
         {}
     )  # Key: imagehash.phash object, Value: OCR result string.
 
+#     ocr_prompt = """
+#         You are an extremely precise image-to-text transcription engine.
+
+# 【CORE TASK】
+# Transcribe (OCR) every readable piece of text, button label, code snippet, menu item, and number visible on the screen image verbatim. 
+
+# 【STRICT CONSTRAINTS】
+# 1. Transcribe Only: Read from top-to-bottom and left-to-right. Copy exactly what you see.
+# 2. NO Summaries: Do NOT explain what the screen is for, do NOT summarize the UI layout, and do NOT outline the general meaning.
+# 3. NO Extensions: Do NOT add background knowledge, do NOT explain terms, and do NOT offer suggestions or fixes for errors shown on screen.
+# 4. Keep Formatting: Preserve original code blocks, tables, and indentation/line breaks as closely as possible.
+
+# 【OUTPUT REQUIREMENT】
+# If no text is detected on the screen, reply with "No text detected." 
+# Otherwise, output the transcribed text directly. Do NOT include any introductory greetings (e.g., "Here is the transcription:") or closing remarks. Jump straight into the transcribed text.
+#         """
+
+
     ocr_prompt = """
-        You are an extremely precise image-to-text transcription engine.
+        Extract useful content from this screenshot for a downstream LLM.
+        Note: The diagram shows a reduction of the factorial program using formal semantics rules.
 
-【CORE TASK】
-Transcribe (OCR) every readable piece of text, button label, code snippet, menu item, and number visible on the screen image verbatim. 
+Rules:
 
-【STRICT CONSTRAINTS】
-1. Transcribe Only: Read from top-to-bottom and left-to-right. Copy exactly what you see.
-2. NO Summaries: Do NOT explain what the screen is for, do NOT summarize the UI layout, and do NOT outline the general meaning.
-3. NO Extensions: Do NOT add background knowledge, do NOT explain terms, and do NOT offer suggestions or fixes for errors shown on screen.
-4. Keep Formatting: Preserve original code blocks, tables, and indentation/line breaks as closely as possible.
+1. Identify the screenshot type. Use one or more of: `slide`, `code`, `document`, `webpage`, `terminal`, `desktop`, `application`, `diagram`, `table`.
 
-【OUTPUT REQUIREMENT】
-If no text is detected on the screen, reply with "No text detected." 
-Otherwise, output the transcribed text directly. Do NOT include any introductory greetings (e.g., "Here is the transcription:") or closing remarks. Jump straight into the transcribed text.
-        """
+   * If multiple types apply, list them together, e.g. `Type: slide, code`.
+   * Do not use `mixed`.
+
+2. Ignore irrelevant UI such as desktop background, app icons, taskbars, browser bars, Zoom/Teams controls, window chrome, and unrelated UI.
+
+3. Extract only meaningful visible content:
+
+   * Titles and headings
+   * Text and bullet points
+   * Code
+   * Formulas
+   * Tables
+   * Labels
+   * Important diagram relationships
+
+4. Preserve the original reading order and visual structure.
+   Clearly label information blocks, for example:
+   `Left:`, `Right:`, `Top:`, `Bottom:`, `Code:`, `Table:`, `Diagram:`
+
+5. Do not explain, summarize, or infer information that is not visible.
+   Preserve code, formulas, and technical terms accurately.
+
+6. Remove repetition and low-value text.
+
+7. Keep the output concise and preferably under 600 tokens.
+
+8. If there is no useful content, output:
+   `Type: irrelevant`
+
+Output:
+Type: <one or more types>
+
+Content: <structured extraction>
+"""
 
     def make_result(timestamp, content, ocr_time=0, input_tokens=0, output_tokens=0):
         return {
@@ -414,8 +458,17 @@ def main():
 
         # 只处理指定时间段；None 或 [] 表示整段视频。
         # 支持秒数或 "HH:MM:SS" / "MM:SS"，例如:
-        # time_ranges = [(0, 60), ("10:00", "12:30"), [90, 120]]
-        time_ranges = None
+        time_ranges = [
+        # ("00:00:28", "00:00:28"),
+        # ("00:00:41", "00:00:41"),
+        # ("00:40:27", "00:40:27"),
+        # ("01:01:46", "01:01:46"),
+        # ("01:16:32", "01:16:32"),
+        # ("02:11:50", "02:11:50"),
+        # ("03:05:22", "03:05:22"),
+        # ("03:07:02", "03:07:02"),
+    ]
+
 
         # 默认走 Ollama（OCR_BACKEND=ollama）。若用 vLLM：
         #   OCR_BACKEND=vllm VLLM_BASE_URL=http://localhost:8000
@@ -423,7 +476,7 @@ def main():
         process_video(
             video_path,
             output_dir,
-            model_name=os.environ.get("OCR_MODEL", "qwen3-vl:32b"),
+            model_name=os.environ.get("OCR_MODEL", "qwen3-vl:8b-instruct"),
             interval_seconds=1,
             max_test_seconds=None,  # Process full video
             max_ocr_workers=int(os.environ.get("OCR_MAX_WORKERS", "1")),
